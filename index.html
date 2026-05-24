@@ -272,6 +272,10 @@
       </div>
       <div class="topbar-chips">
         <span class="chip chip-date" id="topbarDate"></span>
+        <button id="btnRefreshRates" onclick="refreshRates()" title="ดึงราคาล่าสุดจาก Google Sheets" style="display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:20px;font-size:12px;font-weight:600;background:#F8FAFC;color:var(--text-soft);border:1px solid var(--border-soft);cursor:pointer;font-family:inherit;transition:all 0.15s;">
+          <svg id="refreshIcon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.5"/></svg>
+          Sync ราคา
+        </button>
         <span class="chip chip-indigo" id="topbarBadge">
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/></svg>
           0 การจอง
@@ -652,6 +656,17 @@ function normalizeHeader(h) {
   if (s.includes('ติดตั้ง') || s.includes('install')) return 'install'
   if (s.includes('btu') || s.includes('ขนาด') || s.includes('size')) return 'btu'
   return null
+}
+
+// ── Manual refresh button ──
+async function refreshRates() {
+  const btn = document.getElementById('btnRefreshRates')
+  const icon = document.getElementById('refreshIcon')
+  btn.disabled = true
+  icon.style.animation = 'spin 0.8s linear infinite'
+  await loadRatesFromSheet()
+  icon.style.animation = ''
+  btn.disabled = false
 }
 
 // ── Load rates from Google Sheets ──
