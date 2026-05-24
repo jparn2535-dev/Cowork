@@ -69,7 +69,7 @@ export default async function handler(req, res) {
       })
     }
 
-    res.setHeader('Cache-Control', 's-maxage=60, stale-while-revalidate=30')
+    res.setHeader('Cache-Control', 's-maxage=55, stale-while-revalidate=10')
     res.status(200).json({
       ok: true,
       rates: result.rates,

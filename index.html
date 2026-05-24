@@ -680,8 +680,8 @@ async function refreshRates() {
 }
 
 // ── Load rates: try Vercel API → fallback direct CSV ──
-async function loadRatesFromSheet() {
-  showSheetStatus('loading')
+async function loadRatesFromSheet(silent = false) {
+  if (!silent) showSheetStatus('loading')
   try {
     // 1st attempt: Vercel API proxy
     const res = await fetch(RATES_API)
@@ -766,12 +766,26 @@ function showSheetStatus(type, msg) {
   }
 }
 
+let _autoSyncTimer = null
+
+function startAutoSync(intervalMs = 60_000) {
+  if (_autoSyncTimer) clearInterval(_autoSyncTimer)
+  _autoSyncTimer = setInterval(async () => {
+    const prevRates = JSON.stringify(RATES)
+    await loadRatesFromSheet(true)       // silent = true → no banner unless changed
+    if (JSON.stringify(RATES) !== prevRates) {
+      showSheetStatus('ok', 'ราคาอัปเดตอัตโนมัติแล้ว')
+    }
+  }, intervalMs)
+}
+
 async function init() {
   document.getElementById('bookDate').setAttribute('min', new Date().toISOString().split('T')[0])
   document.getElementById('topbarDate').textContent = new Date().toLocaleDateString('th-TH', { weekday:'short', day:'numeric', month:'short', year:'numeric' })
   buildRateTables()
   addServiceRow()
   await loadRatesFromSheet()
+  startAutoSync(60_000)   // auto-sync ทุก 1 นาที
 }
 
 // ── Rate Tables ──
