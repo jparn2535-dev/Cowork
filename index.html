@@ -155,6 +155,7 @@
     .confirm-panel { display: none; }
     .confirm-panel.show { display: block; animation: fadeUp 0.32s cubic-bezier(.4,0,.2,1); }
     @keyframes fadeUp { from { opacity:0; transform:translateY(14px); } to { opacity:1; transform:translateY(0); } }
+    @keyframes spin { to { transform: rotate(360deg); } }
 
     .confirm-bk-box { background: linear-gradient(135deg, #F0FDF4, #ECFDF5); border: 1.5px solid #86EFAC; border-radius: 12px; padding: 18px 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }
     .badge { display: inline-flex; align-items: center; gap: 5px; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 700; }
@@ -271,6 +272,10 @@
       </div>
       <div class="topbar-chips">
         <span class="chip chip-date" id="topbarDate"></span>
+        <button id="btnRefreshRates" onclick="refreshRates()" title="ดึงราคาล่าสุดจาก Google Sheets" style="display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:20px;font-size:12px;font-weight:600;background:#F8FAFC;color:var(--text-soft);border:1px solid var(--border-soft);cursor:pointer;font-family:inherit;transition:all 0.15s;">
+          <svg id="refreshIcon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.5"/></svg>
+          Sync ราคา
+        </button>
         <span class="chip chip-indigo" id="topbarBadge">
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/></svg>
           0 การจอง
@@ -609,11 +614,17 @@ const AC_SIZES = [
   { value:'24000', label:'24,000 BTU' },
   { value:'36000', label:'36,000 BTU' },
 ]
-const RATES = {
+
+const RATES_DEFAULT = {
   clean:   { '9000':500,  '12000':600,  '18000':800,  '24000':1000, '36000':1500 },
   repair:  { '9000':800,  '12000':900,  '18000':1200, '24000':1500, '36000':2000 },
   install: { '9000':1500, '12000':1800, '18000':2200, '24000':2500, '36000':3000 },
 }
+let RATES = JSON.parse(JSON.stringify(RATES_DEFAULT))
+
+const RATES_API = '/api/rates'
+const SHEET_CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRb-9uV6SPDISMHHDAHGQIoR6YLOF5lg7FryTFeeotf6R-kCJKD6Imtt0jKgBeUnHh4z9EJ7wr7FqGZ/pub?output=csv'
+
 const TRAVEL_FEES = { '0-10':100, '11-20':200, '21-30':300, '31-50':500, '51+':700 }
 const DISTANCE_LABELS = { '0-10':'0–10 กม.', '11-20':'11–20 กม.', '21-30':'21–30 กม.', '31-50':'31–50 กม.', '51+':'50+ กม.' }
 
@@ -621,11 +632,160 @@ let rowCount = 0
 let bookings = []
 const fmt = n => n.toLocaleString('th-TH')
 
-function init() {
+// ── CSV helpers (used for direct fallback) ──
+function parseCSV(text) {
+  const lines = text.trim().split(/\r?\n/)
+  if (lines.length < 2) return { headers: [], rows: [] }
+  const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim())
+  const rows = lines.slice(1).map(line => {
+    const cols = []; let cur = '', inQ = false
+    for (const ch of line) {
+      if (ch === '"') { inQ = !inQ }
+      else if (ch === ',' && !inQ) { cols.push(cur.trim()); cur = '' }
+      else { cur += ch }
+    }
+    cols.push(cur.trim())
+    return cols
+  }).filter(r => r.some(c => c !== ''))
+  return { headers, rows }
+}
+
+
+function applyRates(rates) {
+  let loaded = 0
+  for (const btu of Object.keys(rates.clean || {})) {
+    RATES.clean[btu] = rates.clean[btu]
+    RATES.repair[btu] = rates.repair[btu]
+    RATES.install[btu] = rates.install[btu]
+    // sync AC_SIZES if this BTU is new
+    if (!AC_SIZES.find(s => s.value === btu)) {
+      const num = parseInt(btu).toLocaleString('en') + ' BTU'
+      AC_SIZES.push({ value: btu, label: num })
+      AC_SIZES.sort((a, b) => parseInt(a.value) - parseInt(b.value))
+    }
+    loaded++
+  }
+  return loaded
+}
+
+// ── Manual refresh button ──
+async function refreshRates() {
+  const btn = document.getElementById('btnRefreshRates')
+  const icon = document.getElementById('refreshIcon')
+  btn.disabled = true
+  icon.style.animation = 'spin 0.8s linear infinite'
+  await loadRatesFromSheet()
+  icon.style.animation = ''
+  btn.disabled = false
+}
+
+// ── Load rates: try Vercel API → fallback direct CSV ──
+async function loadRatesFromSheet(silent = false) {
+  if (!silent) showSheetStatus('loading')
+  try {
+    // 1st attempt: Vercel API proxy
+    const res = await fetch(RATES_API)
+    if (res.ok) {
+      const json = await res.json()
+      if (json.ok && json.rates) {
+        const loaded = applyRates(json.rates)
+        if (!loaded) throw new Error('ไม่พบข้อมูลราคา')
+        showSheetStatus('ok', `โหลดราคาสำเร็จ (${loaded} ขนาด)`)
+        buildRateTables()
+        updateSummary()
+        return
+      }
+    }
+    // 2nd attempt: direct CSV
+    await loadRatesFromCSV()
+  } catch (err) {
+    try {
+      await loadRatesFromCSV()
+    } catch (csvErr) {
+      showSheetStatus('error', `โหลดไม่ได้ — ${csvErr.message}`)
+      console.warn('[Rates] both sources failed:', err, csvErr)
+    }
+  }
+}
+
+function normalizeServiceType(s) {
+  const v = s.toLowerCase().replace(/\s+/g, '')
+  if (v.includes('ล้าง') || v.includes('clean') || v.includes('wash')) return 'clean'
+  if (v.includes('ซ่อม') || v.includes('repair') || v.includes('fix')) return 'repair'
+  if (v.includes('ติดตั้ง') || v.includes('install')) return 'install'
+  return null
+}
+
+async function loadRatesFromCSV() {
+  const res = await fetch(SHEET_CSV_URL)
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const text = await res.text()
+  const lines = text.trim().split(/\r?\n/).filter(l => l.trim())
+  if (lines.length < 2) throw new Error('ข้อมูลไม่ครบ')
+
+  const { rows: allRows, headers } = parseCSV(text)
+  const btuKeys = headers.slice(1).map(h => h.replace(/[,\s"]/g, ''))
+
+  const rates = { clean: {}, repair: {}, install: {} }
+  allRows.forEach(cols => {
+    const serviceType = normalizeServiceType(cols[0] || '')
+    if (!serviceType) return
+    btuKeys.forEach((btu, j) => {
+      const price = parseInt(String(cols[j + 1] || '').replace(/[,\s฿"]/g, ''))
+      if (btu && !isNaN(price) && price > 0) rates[serviceType][btu] = price
+    })
+  })
+
+  const loaded = applyRates(rates)
+  if (!loaded) throw new Error('ไม่พบข้อมูลราคา')
+  showSheetStatus('ok', `โหลดราคาสำเร็จ (${loaded} ขนาด)`)
+  buildRateTables()
+  updateSummary()
+}
+
+// ── Status banner ──
+function showSheetStatus(type, msg) {
+  let el = document.getElementById('sheetStatus')
+  if (!el) {
+    el = document.createElement('div')
+    el.id = 'sheetStatus'
+    el.style.cssText = 'position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:999;padding:9px 18px;border-radius:20px;font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:7px;box-shadow:0 4px 14px rgba(0,0,0,0.12);transition:all 0.3s;white-space:nowrap;'
+    document.body.appendChild(el)
+  }
+  if (type === 'loading') {
+    el.style.background = '#EEF2FF'; el.style.color = '#6366F1'; el.style.border = '1px solid #C7D2FE'
+    el.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="animation:spin 1s linear infinite"><path d="M21 12a9 9 0 1 1-6.2-8.56"/></svg> กำลังโหลดราคาจาก Google Sheets…'
+  } else if (type === 'ok') {
+    el.style.background = '#DCFCE7'; el.style.color = '#166534'; el.style.border = '1px solid #86EFAC'
+    el.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> ${msg}`
+    setTimeout(() => el?.remove(), 4000)
+  } else {
+    el.style.background = '#FEF2F2'; el.style.color = '#B91C1C'; el.style.border = '1px solid #FECACA'
+    el.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg> ${msg}`
+    setTimeout(() => el?.remove(), 6000)
+  }
+}
+
+let _autoSyncTimer = null
+
+function startAutoSync(intervalMs = 60_000) {
+  if (_autoSyncTimer) clearInterval(_autoSyncTimer)
+  _autoSyncTimer = setInterval(async () => {
+    const prevRates = JSON.stringify(RATES)
+    await loadRatesFromSheet(true)       // silent = true → no banner unless changed
+    if (JSON.stringify(RATES) !== prevRates) {
+      showSheetStatus('ok', 'ราคาอัปเดตอัตโนมัติแล้ว')
+    }
+  }, intervalMs)
+}
+
+async function init() {
   document.getElementById('bookDate').setAttribute('min', new Date().toISOString().split('T')[0])
   document.getElementById('topbarDate').textContent = new Date().toLocaleDateString('th-TH', { weekday:'short', day:'numeric', month:'short', year:'numeric' })
   buildRateTables()
   addServiceRow()
+  await loadRatesFromSheet()
+  startAutoSync(60_000)   // auto-sync ทุก 1 นาที
 }
 
 // ── Rate Tables ──
@@ -951,7 +1111,7 @@ function resetForm() {
 }
 function newBooking() { resetForm() }
 
-init()
+init().catch(console.error)
 </script>
 </body>
 </html>
