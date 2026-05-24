@@ -19,8 +19,8 @@ function parseCSV(text) {
 
 function normalizeHeader(h) {
   const s = h.toLowerCase().replace(/\s+/g, '')
-  if (s.includes('ล้าง') || s.includes('clean')) return 'clean'
-  if (s.includes('ซ่อม') || s.includes('repair')) return 'repair'
+  if (s.includes('ล้าง') || s.includes('clean') || s.includes('wash')) return 'clean'
+  if (s.includes('ซ่อม') || s.includes('repair') || s.includes('fix')) return 'repair'
   if (s.includes('ติดตั้ง') || s.includes('install')) return 'install'
   if (s.includes('btu') || s.includes('ขนาด') || s.includes('size')) return 'btu'
   return null
@@ -37,17 +37,23 @@ export default async function handler(req, res) {
     const text = await response.text()
     const lines = text.trim().split(/\r?\n/)
 
-    const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim())
+    const rawHeaders = lines[0].split(',').map(h => h.replace(/"/g, '').trim())
     const colMap = {}
-    headers.forEach((h, i) => { const k = normalizeHeader(h); if (k) colMap[k] = i })
+    rawHeaders.forEach((h, i) => { const k = normalizeHeader(h); if (k) colMap[k] = i })
 
-    if (!colMap.btu || !colMap.clean || !colMap.repair || !colMap.install) {
-      throw new Error('Missing required columns (BTU, ล้างแอร์, ซ่อมแอร์, ติดตั้งแอร์)')
+    // use 'in' so index 0 is not treated as falsy
+    const missing = ['btu', 'clean', 'repair', 'install'].filter(k => !(k in colMap))
+    if (missing.length) {
+      return res.status(400).json({
+        ok: false,
+        error: `ไม่พบคอลัมน์: ${missing.join(', ')}`,
+        rawHeaders,
+        tip: 'ชื่อคอลัมน์ที่รองรับ: BTU/ขนาด, ล้างแอร์/clean, ซ่อมแอร์/repair, ติดตั้งแอร์/install'
+      })
     }
 
     const rates = { clean: {}, repair: {}, install: {} }
-    const rows = parseCSV(text)
-    rows.forEach(cols => {
+    parseCSV(text).forEach(cols => {
       const btu = String(cols[colMap.btu]).replace(/[,\s]/g, '')
       const clean = parseInt(String(cols[colMap.clean]).replace(/[,\s฿]/g, ''))
       const repair = parseInt(String(cols[colMap.repair]).replace(/[,\s฿]/g, ''))
@@ -59,9 +65,8 @@ export default async function handler(req, res) {
       }
     })
 
-    // Cache 5 minutes on Vercel edge
-    res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate=60')
-    res.status(200).json({ ok: true, rates, updatedAt: new Date().toISOString() })
+    res.setHeader('Cache-Control', 's-maxage=60, stale-while-revalidate=30')
+    res.status(200).json({ ok: true, rates, rawHeaders, updatedAt: new Date().toISOString() })
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message })
   }

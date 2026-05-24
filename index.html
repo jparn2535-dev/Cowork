@@ -723,8 +723,9 @@ async function loadRatesFromCSV() {
   const { headers, rows } = parseCSV(text)
   const colMap = {}
   headers.forEach((h, i) => { const k = normalizeHeader(h); if (k) colMap[k] = i })
-  if (!colMap.btu || !colMap.clean || !colMap.repair || !colMap.install)
-    throw new Error('คอลัมน์ไม่ครบ: ต้องมี BTU, ล้างแอร์, ซ่อมแอร์, ติดตั้งแอร์')
+  const missing = ['btu','clean','repair','install'].filter(k => !(k in colMap))
+  if (missing.length)
+    throw new Error(`ไม่พบคอลัมน์: ${missing.join(', ')} (headers: ${headers.join(' | ')})`)
   const rates = { clean: {}, repair: {}, install: {} }
   rows.forEach(cols => {
     const btu = String(cols[colMap.btu]).replace(/[,\s]/g, '')
