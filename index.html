@@ -155,6 +155,7 @@
     .confirm-panel { display: none; }
     .confirm-panel.show { display: block; animation: fadeUp 0.32s cubic-bezier(.4,0,.2,1); }
     @keyframes fadeUp { from { opacity:0; transform:translateY(14px); } to { opacity:1; transform:translateY(0); } }
+    @keyframes spin { to { transform: rotate(360deg); } }
 
     .confirm-bk-box { background: linear-gradient(135deg, #F0FDF4, #ECFDF5); border: 1.5px solid #86EFAC; border-radius: 12px; padding: 18px 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }
     .badge { display: inline-flex; align-items: center; gap: 5px; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 700; }
@@ -609,11 +610,16 @@ const AC_SIZES = [
   { value:'24000', label:'24,000 BTU' },
   { value:'36000', label:'36,000 BTU' },
 ]
-const RATES = {
+
+const RATES_DEFAULT = {
   clean:   { '9000':500,  '12000':600,  '18000':800,  '24000':1000, '36000':1500 },
   repair:  { '9000':800,  '12000':900,  '18000':1200, '24000':1500, '36000':2000 },
   install: { '9000':1500, '12000':1800, '18000':2200, '24000':2500, '36000':3000 },
 }
+let RATES = JSON.parse(JSON.stringify(RATES_DEFAULT))
+
+const SHEET_CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRb-9uV6SPDISMHHDAHGQIoR6YLOF5lg7FryTFeeotf6R-kCJKD6Imtt0jKgBeUnHh4z9EJ7wr7FqGZ/pub?output=csv'
+
 const TRAVEL_FEES = { '0-10':100, '11-20':200, '21-30':300, '31-50':500, '51+':700 }
 const DISTANCE_LABELS = { '0-10':'0–10 กม.', '11-20':'11–20 กม.', '21-30':'21–30 กม.', '31-50':'31–50 กม.', '51+':'50+ กม.' }
 
@@ -621,11 +627,105 @@ let rowCount = 0
 let bookings = []
 const fmt = n => n.toLocaleString('th-TH')
 
-function init() {
+// ── CSV Parser ──
+function parseCSV(text) {
+  const lines = text.trim().split(/\r?\n/)
+  if (lines.length < 2) return []
+  return lines.slice(1).map(line => {
+    const cols = []
+    let cur = '', inQ = false
+    for (const ch of line) {
+      if (ch === '"') { inQ = !inQ }
+      else if (ch === ',' && !inQ) { cols.push(cur.trim()); cur = '' }
+      else { cur += ch }
+    }
+    cols.push(cur.trim())
+    return cols
+  }).filter(r => r.some(c => c !== ''))
+}
+
+// ── Column header normalizer ──
+function normalizeHeader(h) {
+  const s = h.toLowerCase().replace(/\s+/g, '')
+  if (s.includes('ล้าง') || s.includes('clean')) return 'clean'
+  if (s.includes('ซ่อม') || s.includes('repair')) return 'repair'
+  if (s.includes('ติดตั้ง') || s.includes('install')) return 'install'
+  if (s.includes('btu') || s.includes('ขนาด') || s.includes('size')) return 'btu'
+  return null
+}
+
+// ── Load rates from Google Sheets ──
+async function loadRatesFromSheet() {
+  showSheetStatus('loading')
+  try {
+    const res = await fetch(SHEET_CSV_URL)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const text = await res.text()
+    const lines = text.trim().split(/\r?\n/)
+    if (lines.length < 2) throw new Error('ข้อมูลไม่ครบ')
+
+    const headers = lines[0].split(',').map(h => h.replace(/"/g,'').trim())
+    const colMap = {}
+    headers.forEach((h, i) => { const k = normalizeHeader(h); if (k) colMap[k] = i })
+
+    if (!('btu' in colMap) || !('clean' in colMap) || !('repair' in colMap) || !('install' in colMap)) {
+      throw new Error('ไม่พบคอลัมน์ที่ต้องการ (BTU, ล้างแอร์, ซ่อมแอร์, ติดตั้งแอร์)')
+    }
+
+    const rows = parseCSV(text)
+    let loaded = 0
+    rows.forEach(cols => {
+      const btu = String(cols[colMap.btu]).replace(/[,\s]/g, '')
+      const clean = parseInt(String(cols[colMap.clean]).replace(/[,\s฿]/g, ''))
+      const repair = parseInt(String(cols[colMap.repair]).replace(/[,\s฿]/g, ''))
+      const install = parseInt(String(cols[colMap.install]).replace(/[,\s฿]/g, ''))
+      if (btu && !isNaN(clean) && !isNaN(repair) && !isNaN(install)) {
+        RATES.clean[btu] = clean
+        RATES.repair[btu] = repair
+        RATES.install[btu] = install
+        loaded++
+      }
+    })
+
+    if (!loaded) throw new Error('ไม่พบข้อมูลราคา')
+    showSheetStatus('ok', `โหลดราคาจาก Google Sheets แล้ว (${loaded} ขนาด)`)
+    buildRateTables()
+    updateSummary()
+  } catch (err) {
+    showSheetStatus('error', `ใช้ราคาสำรอง — ${err.message}`)
+    console.warn('[Sheet] load failed:', err)
+  }
+}
+
+// ── Status banner ──
+function showSheetStatus(type, msg) {
+  let el = document.getElementById('sheetStatus')
+  if (!el) {
+    el = document.createElement('div')
+    el.id = 'sheetStatus'
+    el.style.cssText = 'position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:999;padding:9px 18px;border-radius:20px;font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:7px;box-shadow:0 4px 14px rgba(0,0,0,0.12);transition:all 0.3s;white-space:nowrap;'
+    document.body.appendChild(el)
+  }
+  if (type === 'loading') {
+    el.style.background = '#EEF2FF'; el.style.color = '#6366F1'; el.style.border = '1px solid #C7D2FE'
+    el.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="animation:spin 1s linear infinite"><path d="M21 12a9 9 0 1 1-6.2-8.56"/></svg> กำลังโหลดราคาจาก Google Sheets…'
+  } else if (type === 'ok') {
+    el.style.background = '#DCFCE7'; el.style.color = '#166534'; el.style.border = '1px solid #86EFAC'
+    el.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> ${msg}`
+    setTimeout(() => el?.remove(), 4000)
+  } else {
+    el.style.background = '#FEF2F2'; el.style.color = '#B91C1C'; el.style.border = '1px solid #FECACA'
+    el.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg> ${msg}`
+    setTimeout(() => el?.remove(), 6000)
+  }
+}
+
+async function init() {
   document.getElementById('bookDate').setAttribute('min', new Date().toISOString().split('T')[0])
   document.getElementById('topbarDate').textContent = new Date().toLocaleDateString('th-TH', { weekday:'short', day:'numeric', month:'short', year:'numeric' })
   buildRateTables()
   addServiceRow()
+  await loadRatesFromSheet()
 }
 
 // ── Rate Tables ──
@@ -951,7 +1051,7 @@ function resetForm() {
 }
 function newBooking() { resetForm() }
 
-init()
+init().catch(console.error)
 </script>
 </body>
 </html>
