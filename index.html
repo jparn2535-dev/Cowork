@@ -622,7 +622,7 @@ const RATES_DEFAULT = {
 }
 let RATES = JSON.parse(JSON.stringify(RATES_DEFAULT))
 
-const SHEET_CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRb-9uV6SPDISMHHDAHGQIoR6YLOF5lg7FryTFeeotf6R-kCJKD6Imtt0jKgBeUnHh4z9EJ7wr7FqGZ/pub?output=csv'
+const RATES_API = '/api/rates'
 
 const TRAVEL_FEES = { '0-10':100, '11-20':200, '21-30':300, '31-50':500, '51+':700 }
 const DISTANCE_LABELS = { '0-10':'0–10 กม.', '11-20':'11–20 กม.', '21-30':'21–30 กม.', '31-50':'31–50 กม.', '51+':'50+ กม.' }
@@ -631,32 +631,6 @@ let rowCount = 0
 let bookings = []
 const fmt = n => n.toLocaleString('th-TH')
 
-// ── CSV Parser ──
-function parseCSV(text) {
-  const lines = text.trim().split(/\r?\n/)
-  if (lines.length < 2) return []
-  return lines.slice(1).map(line => {
-    const cols = []
-    let cur = '', inQ = false
-    for (const ch of line) {
-      if (ch === '"') { inQ = !inQ }
-      else if (ch === ',' && !inQ) { cols.push(cur.trim()); cur = '' }
-      else { cur += ch }
-    }
-    cols.push(cur.trim())
-    return cols
-  }).filter(r => r.some(c => c !== ''))
-}
-
-// ── Column header normalizer ──
-function normalizeHeader(h) {
-  const s = h.toLowerCase().replace(/\s+/g, '')
-  if (s.includes('ล้าง') || s.includes('clean')) return 'clean'
-  if (s.includes('ซ่อม') || s.includes('repair')) return 'repair'
-  if (s.includes('ติดตั้ง') || s.includes('install')) return 'install'
-  if (s.includes('btu') || s.includes('ขนาด') || s.includes('size')) return 'btu'
-  return null
-}
 
 // ── Manual refresh button ──
 async function refreshRates() {
@@ -669,38 +643,23 @@ async function refreshRates() {
   btn.disabled = false
 }
 
-// ── Load rates from Google Sheets ──
+// ── Load rates via Vercel API proxy ──
 async function loadRatesFromSheet() {
   showSheetStatus('loading')
   try {
-    const res = await fetch(SHEET_CSV_URL)
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const text = await res.text()
-    const lines = text.trim().split(/\r?\n/)
-    if (lines.length < 2) throw new Error('ข้อมูลไม่ครบ')
+    const res = await fetch(RATES_API)
+    if (!res.ok) throw new Error(`API ${res.status}`)
+    const json = await res.json()
+    if (!json.ok) throw new Error(json.error || 'API error')
 
-    const headers = lines[0].split(',').map(h => h.replace(/"/g,'').trim())
-    const colMap = {}
-    headers.forEach((h, i) => { const k = normalizeHeader(h); if (k) colMap[k] = i })
-
-    if (!('btu' in colMap) || !('clean' in colMap) || !('repair' in colMap) || !('install' in colMap)) {
-      throw new Error('ไม่พบคอลัมน์ที่ต้องการ (BTU, ล้างแอร์, ซ่อมแอร์, ติดตั้งแอร์)')
-    }
-
-    const rows = parseCSV(text)
+    const { rates } = json
     let loaded = 0
-    rows.forEach(cols => {
-      const btu = String(cols[colMap.btu]).replace(/[,\s]/g, '')
-      const clean = parseInt(String(cols[colMap.clean]).replace(/[,\s฿]/g, ''))
-      const repair = parseInt(String(cols[colMap.repair]).replace(/[,\s฿]/g, ''))
-      const install = parseInt(String(cols[colMap.install]).replace(/[,\s฿]/g, ''))
-      if (btu && !isNaN(clean) && !isNaN(repair) && !isNaN(install)) {
-        RATES.clean[btu] = clean
-        RATES.repair[btu] = repair
-        RATES.install[btu] = install
-        loaded++
-      }
-    })
+    for (const btu of Object.keys(rates.clean || {})) {
+      RATES.clean[btu] = rates.clean[btu]
+      RATES.repair[btu] = rates.repair[btu]
+      RATES.install[btu] = rates.install[btu]
+      loaded++
+    }
 
     if (!loaded) throw new Error('ไม่พบข้อมูลราคา')
     showSheetStatus('ok', `โหลดราคาจาก Google Sheets แล้ว (${loaded} ขนาด)`)
@@ -708,7 +667,7 @@ async function loadRatesFromSheet() {
     updateSummary()
   } catch (err) {
     showSheetStatus('error', `ใช้ราคาสำรอง — ${err.message}`)
-    console.warn('[Sheet] load failed:', err)
+    console.warn('[Rates API] load failed:', err)
   }
 }
 
