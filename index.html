@@ -650,14 +650,6 @@ function parseCSV(text) {
   return { headers, rows }
 }
 
-function normalizeHeader(h) {
-  const s = h.toLowerCase().replace(/\s+/g, '')
-  if (s.includes('ล้าง') || s.includes('clean')) return 'clean'
-  if (s.includes('ซ่อม') || s.includes('repair')) return 'repair'
-  if (s.includes('ติดตั้ง') || s.includes('install')) return 'install'
-  if (s.includes('btu') || s.includes('ขนาด') || s.includes('size')) return 'btu'
-  return null
-}
 
 function applyRates(rates) {
   let loaded = 0
@@ -716,26 +708,34 @@ async function loadRatesFromSheet() {
   }
 }
 
+function normalizeServiceType(s) {
+  const v = s.toLowerCase().replace(/\s+/g, '')
+  if (v.includes('ล้าง') || v.includes('clean') || v.includes('wash')) return 'clean'
+  if (v.includes('ซ่อม') || v.includes('repair') || v.includes('fix')) return 'repair'
+  if (v.includes('ติดตั้ง') || v.includes('install')) return 'install'
+  return null
+}
+
 async function loadRatesFromCSV() {
   const res = await fetch(SHEET_CSV_URL)
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const text = await res.text()
-  const { headers, rows } = parseCSV(text)
-  const colMap = {}
-  headers.forEach((h, i) => { const k = normalizeHeader(h); if (k) colMap[k] = i })
-  const missing = ['btu','clean','repair','install'].filter(k => !(k in colMap))
-  if (missing.length)
-    throw new Error(`ไม่พบคอลัมน์: ${missing.join(', ')} (headers: ${headers.join(' | ')})`)
+  const lines = text.trim().split(/\r?\n/).filter(l => l.trim())
+  if (lines.length < 2) throw new Error('ข้อมูลไม่ครบ')
+
+  const { rows: allRows, headers } = parseCSV(text)
+  const btuKeys = headers.slice(1).map(h => h.replace(/[,\s"]/g, ''))
+
   const rates = { clean: {}, repair: {}, install: {} }
-  rows.forEach(cols => {
-    const btu = String(cols[colMap.btu]).replace(/[,\s]/g, '')
-    const clean = parseInt(String(cols[colMap.clean]).replace(/[,\s฿]/g, ''))
-    const repair = parseInt(String(cols[colMap.repair]).replace(/[,\s฿]/g, ''))
-    const install = parseInt(String(cols[colMap.install]).replace(/[,\s฿]/g, ''))
-    if (btu && !isNaN(clean) && !isNaN(repair) && !isNaN(install)) {
-      rates.clean[btu] = clean; rates.repair[btu] = repair; rates.install[btu] = install
-    }
+  allRows.forEach(cols => {
+    const serviceType = normalizeServiceType(cols[0] || '')
+    if (!serviceType) return
+    btuKeys.forEach((btu, j) => {
+      const price = parseInt(String(cols[j + 1] || '').replace(/[,\s฿"]/g, ''))
+      if (btu && !isNaN(price) && price > 0) rates[serviceType][btu] = price
+    })
   })
+
   const loaded = applyRates(rates)
   if (!loaded) throw new Error('ไม่พบข้อมูลราคา')
   showSheetStatus('ok', `โหลดราคาสำเร็จ (${loaded} ขนาด)`)
